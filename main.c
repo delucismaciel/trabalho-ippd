@@ -10,7 +10,7 @@
 #define video_height 360
 #define video_frames 119 //119
 #define block_size 8
-#define neighbor 32 //3x o tamanho do bloco
+#define neighbor 16 //2x o tamanho do bloco
 #define tolerance 6
 
 #define MIN(a,b) (((a)<(b))?(a):(b))
@@ -27,8 +27,16 @@ typedef struct {
 
 //Primeiro frame, usado como referencia
 unsigned char reference [video_height][video_width];
+unsigned char referenceU [video_height/2][video_width/2];
+unsigned char referenceV [video_height/2][video_width/2];
+//Frame de comparação
 unsigned char current   [video_height][video_width];
-//unsigned int qntByFrame [video_frames];
+unsigned char currentU [video_height/2][video_width/2];
+unsigned char currentV [video_height/2][video_width/2];
+//Novo frame com os blocos da referencia
+unsigned char rebuilded [video_height][video_width];
+unsigned char rebuildedU [video_height/2][video_width/2];
+unsigned char rebuildedV [video_height/2][video_width/2];
 
 //Offset deslocamento[video_frames][1000];
 Offset Ra[video_height/8][video_width/8];
@@ -46,7 +54,7 @@ int main(int argc, char** argv){
     printf("Cria o vetor de flags");
     int j=0,i=0;
 
-    //  Zera
+    //Zera Flag
     #pragma omp parallel for private(j,i)
     for (int index = 0; index < video_height*video_width; index++)
     {
@@ -67,23 +75,24 @@ int main(int argc, char** argv){
         }
     }
 
+    // Pega o frame de referencia
     GetFrame(selectedFrame,1);
 
     printf("Frames Selecionados: %d e %d\n", selectedFrame, compareFrame);
     printf("Quantidade de Blocos: %d * %d = %d\n", video_height/8, video_width/8, video_height*video_width/64);
-
+    
+    //Pega e procura no frame atual
     OneFrame(compareFrame);
 
-
+/*
     for (int i = 0; i < 1; i++)
     {
         for (int j = 0; j < video_width; j++)
         {
-            printf("%d == %d  |", current[i][j],reference[i][j]);
-        }
-        
+            printf("%d == %d  |", current[i][j], reference[i][j]);
+        }        
     }
-
+*/
 
     printf("\n\tRa - posições no frame Atual");
     printf("\n\tRv - deslocamento entre o frame atual e a referencia");
@@ -98,12 +107,14 @@ int main(int argc, char** argv){
             if(Ra[l][c].isBlock){
                 printf("%2d,%2d  ", Ra[l][c].l, Ra[l][c].c);                
             }else{
-                printf("   X   ");                 
-
+                printf("   X   ");
             }
         }
         printf("|\n");
     }
+    
+    RebuildFile();
+
     return 0;
 }
 
@@ -117,11 +128,11 @@ int GetFrame(int frame_num, int isReference)
     //printf("\nBuscando  o frame %d\n",frame_num);
 
     FILE *file = fopen("original.yuv","rb+");
-        int nSize = video_width*video_height;
-        if(!file){
-            printf("\nErro ao abrir arquivo");
-            return -1;
-        }
+    int nSize = video_width*video_height;
+    if(!file){
+        printf("\nErro ao abrir arquivo");
+        return -1;
+    }
 
     //Desloca para o frame desejado através do cálculo:
     //tamanho do frame*número de frames pulados*tamanho do char
@@ -130,8 +141,11 @@ int GetFrame(int frame_num, int isReference)
     fseek(file, fullFrameSize*frame_num , SEEK_SET);
 
     fread(isReference!=0?reference:current, sizeof(unsigned char), (video_width * video_height), file);   
+    
+    fseek(file, fullFrameSize*frame_num , SEEK_SET);
+    fread(rebuilded, sizeof(unsigned char), (video_width * video_height), file);   
 
-  //  printf("O frame %d já foi colocado no vetor %s\n", frame_num, frame_num==0?"referencia":"atual");
+    //printf("O frame %d já foi colocado no vetor %s\n", frame_num, frame_num==0?"referencia":"atual");
 
     fclose(file);
 
@@ -153,11 +167,12 @@ void FrameVerifyByBlock(int frame){
     }    
 }
 
+//Verifica Pixel à pixel, portanto, deve ser enviado o bloco*8
 void FindBlockNeighbor(int linha, int coluna){
-    #pragma omp parallel for collapse(2)
+    #pragma omp parallel for collapse(2) firstprivate(linha, coluna)
     for (int i = MAX(0, linha-neighbor); i < MIN(video_height, linha + neighbor); i++)
     {
-        for (int j = MAX(0,coluna-neighbor); j < MIN(video_width,coluna + neighbor); j++)
+        for (int j = MAX(0,coluna-neighbor); j < MIN(video_width, coluna + neighbor); j++)
         {
             if(isBlock[linha][coluna])
                 continue;
@@ -168,7 +183,7 @@ void FindBlockNeighbor(int linha, int coluna){
             {
                 for (int colOffset = 0; colOffset < 8; colOffset++)
                 {
-                    if(abs(current[linha+lineOffset][coluna+colOffset]-reference[lineOffset+i][colOffset+j]) >= tolerance)
+                    if(abs(current[linha+lineOffset][coluna+colOffset] - reference[i+lineOffset][j+colOffset]) > tolerance)
                         isEqual=0;
                 }        
             }            
@@ -183,18 +198,43 @@ void FindBlockNeighbor(int linha, int coluna){
                     Rv[linha/8][coluna/8].l = linha-i;
                     Rv[linha/8][coluna/8].c = coluna-j;
                     currentCorrespondence++;
-                    //Atualiza a flag
-                    for (int i = 0; i < 8; i++)
+                    //Atualiza a flag e a matriz do novo frame
+                    for (int l = 0; l < 8; l++)
                     {
-                        for (int  j = 0; j < 8; j++)
+                        for (int  c = 0; c < 8; c++)
                         {
-                            isBlock[linha+i][coluna+j]=1;
+                            isBlock[linha+l][coluna+c]=1;
+                            rebuilded[linha+l][coluna+c] = reference[i+l][j+c];
                         }
                     }
-                    j+=8;                        
+                    //j+=8;                        
                 }
             }
         }
         
     }    
 }
+
+void RebuildFile(){
+
+    FILE *file = fopen("result.yuv","wb+");
+    int nSize = video_width*video_height;
+    if(!file){
+        printf("\nErro ao abrir arquivo");
+        return -1;
+    }    
+
+    //Frame referencia
+    fwrite(reference,  sizeof(unsigned char),  nSize,   file);   
+    fwrite(referenceU, sizeof(unsigned char),  nSize/4, file);   
+    fwrite(referenceV, sizeof(unsigned char),  nSize/4, file);   
+    //Frame comparado refeito
+    fwrite(rebuilded,  sizeof(unsigned char),  nSize,   file); 
+    fwrite(rebuildedU, sizeof(unsigned char),  nSize/4, file);     
+    fwrite(rebuildedV, sizeof(unsigned char),  nSize/4, file);   
+
+    fclose(file);
+
+    return NULL;
+}
+
